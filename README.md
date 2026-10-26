@@ -10,7 +10,7 @@ Use it to look through questions and answers from everyone in your games, see ho
 2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension` folder.
 
 ## Recording
-
+Run bat.run or:
 ```bash
 python recorder.py
 ```
