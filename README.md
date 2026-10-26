@@ -1,13 +1,13 @@
-# Krillion Puffer Party question recorder
+# Krillion Puffer Party Recorder
 
-Logs every question (category) asked in the Puffer Party games **you play**, plus every answer, pop and placement in those games. You play in your normal Chrome, signed in with Google as usual. A small extension forwards the game's incoming messages to a local recorder. It only listens: it never sends anything to the game or adds a player.
+A game logger and a real-time helper for [Krillion Puffer Party](https://krillion.io/party). A small browser extension sends game data to the logger, which saves it for viewing in a local web dashboard.
+
+Use it to look through questions and answers from everyone in your games, see how often questions repeat, and review past rounds. The real-time window shows the fuse timer, player lives, and heart meter, and keeps track of answers other players have typed during the current round.
 
 ## Setup (once)
 
 1. Install Python 3.
 2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension` folder.
-
-No pip install is needed for this mode.
 
 ## Recording
 
