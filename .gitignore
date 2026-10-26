@@ -1,0 +1,5 @@
+profile/
+__pycache__/
+*.tmp
+*.pyc
+data/

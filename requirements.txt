@@ -1,0 +1,3 @@
+# Optional: the recorder itself needs only Python's standard library.
+pywebview   # live window (python recorder.py --live / python live.py)
+playwright  # only for python recorder.py --browser

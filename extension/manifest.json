@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Puffer Party Recorder",
+  "version": "1.0.0",
+  "description": "Forwards Krillion Puffer Party game messages to the local recorder on 127.0.0.1.",
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Puffer Party Recorder" },
+  "content_scripts": [
+    {
+      "matches": ["https://krillion.io/*"],
+      "js": ["page.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://krillion.io/*"],
+      "js": ["relay.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
