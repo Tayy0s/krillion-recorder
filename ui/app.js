@@ -77,17 +77,26 @@ function niceMax(v) {
 const chartSpecs = new Map();
 let chartId = 0;
 
+function chartSlot(svg, items, options, defaultHeight) {
+  const id = String(++chartId);
+  chartSpecs.set(id, { svg, items, options });
+  return `<div class="chart-slot" data-chart="${id}" style="height:${options.height || defaultHeight}px"></div>`;
+}
+
 function columnChart(items, options = {}) {
   if (!items.length) return `<div class="empty">Nothing yet.</div>`;
-  const id = String(++chartId);
-  chartSpecs.set(id, { items, options });
-  return `<div class="chart-slot" data-chart="${id}" style="height:${options.height || 180}px"></div>`;
+  return chartSlot(columnSvg, items, options, 180);
+}
+
+/** Lines over a shared x axis. data: {xs, series: [{name, values, color, dash?}]}; options: {xLabel, height} */
+function lineChart(data, options = {}) {
+  return chartSlot(lineSvg, data, options, 240);
 }
 
 function drawCharts() {
   document.querySelectorAll("[data-chart]").forEach((slot) => {
     const spec = chartSpecs.get(slot.dataset.chart);
-    if (spec) slot.innerHTML = columnSvg(spec.items, { ...spec.options, width: slot.clientWidth });
+    if (spec) slot.innerHTML = spec.svg(spec.items, { ...spec.options, width: slot.clientWidth });
   });
 }
 
@@ -113,6 +122,58 @@ function columnSvg(items, { width = 640, height = 180, color = "var(--accent)" }
   });
   s += `<line class="base" x1="${L}" x2="${W}" y1="${y(0)}" y2="${y(0)}"/></svg>`;
   return s;
+}
+
+/** Multiples of a round step inside [low, high], about one per `count`. */
+function roundTicks(low, high, count) {
+  const rough = Math.max(1, (high - low) / Math.max(1, count));
+  const p = 10 ** Math.floor(Math.log10(rough));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * p).find((m) => m >= rough);
+  const ticks = [];
+  for (let t = Math.ceil(low / step) * step; t <= high; t += step) ticks.push(t);
+  return ticks;
+}
+
+function lineSvg({ xs, series }, { width = 640, height = 240, xLabel = "" } = {}) {
+  const W = Math.max(200, width), H = height, L = 40, R = 8, T = 8, B = 38;
+  const lo = xs[0], hi = xs[xs.length - 1];
+  const max = niceMax(Math.max(...series.flatMap((d) => d.values).filter((v) => v != null), 1));
+  const x = (v) => L + (W - L - R) * (hi > lo ? (v - lo) / (hi - lo) : 0.5);
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  let s = `<svg class="chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img">`;
+  for (const t of [0, max / 2, max]) s += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${num(t)}</text>`;
+  for (const t of roundTicks(lo, hi, Math.floor((W - L - R) / 48))) s += `<text x="${x(t)}" y="${H - 20}" text-anchor="middle">${num(t)}</text>`;
+  if (xLabel) s += `<text x="${L + (W - L - R) / 2}" y="${H - 4}" text-anchor="middle">${esc(xLabel)}</text>`;
+  s += `<line class="base" x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}"/>`;
+  for (const d of series) {
+    let path = "", pen = false;
+    d.values.forEach((v, i) => {
+      if (v != null) path += `${pen ? "L" : "M"}${x(xs[i]).toFixed(1)},${y(v).toFixed(1)}`;
+      pen = v != null;
+    });
+    s += `<path class="line${d.dash ? " dash" : ""}" d="${path}" stroke="${d.color}"/>`;
+  }
+  // One hover column per few pixels however many points there are, each snapping to its nearest point.
+  const columns = Math.max(1, Math.min(xs.length, Math.floor((W - L - R) / 4)));
+  const colWidth = (W - L - R) / columns;
+  for (let c = 0; c < columns; c++) {
+    const i = columns === 1 ? xs.length - 1 : Math.round((c * (xs.length - 1)) / (columns - 1));
+    const rows = series.map((d) => `<span class="key${d.dash ? " dash" : ""}" style="--c:${d.color}"></span><b>${num(d.values[i])}</b> ${esc(d.name)}`);
+    const tipText = `<b>${num(xs[i])}</b> ${esc(xLabel.toLowerCase())}<br>${rows.join("<br>")}`;
+    const dots = series.filter((d) => d.values[i] != null)
+      .map((d) => `<circle cx="${x(xs[i])}" cy="${y(d.values[i])}" r="4" fill="${d.color}"/>`).join("");
+    s += `<rect class="hit" x="${L + c * colWidth}" y="${T}" width="${colWidth}" height="${H - T - B}" data-tip="${esc(tipText)}"/>`;
+    s += `<g class="cross" pointer-events="none"><line x1="${x(xs[i])}" x2="${x(xs[i])}" y1="${T}" y2="${y(0)}"/>${dots}</g>`;
+  }
+  return `${s}</svg>`;
+}
+
+/** Legend for lines: a stroke key, the series name and its latest value. */
+function lineLegend(series) {
+  return `<div class="legend">${series.map((d) => {
+    const latest = d.values[d.values.length - 1];
+    return `<span class="tag line${d.dash ? " dash" : ""}" style="--c:${d.color}">${esc(d.name)} ${num(latest)}</span>`;
+  }).join("")}</div>`;
 }
 
 /** Horizontal bars as HTML rows, labels left and values right. Rows with href are links. */
@@ -144,8 +205,49 @@ const tierBars = (tiers, href) => barList(tiers.map((t) => ({
 
 // ---- overview ---------------------------------------------------------------------------------
 
+const POOL_MIN_REPEATS = 20;  // with fewer repeats the estimates swing by thousands
+
+function poolPanels(points) {
+  const panel = (title, body) => `<section class="panel"><h2>${esc(title)}</h2>${body}</section>`;
+  const titles = ["Distinct questions", "Pool size estimate"];
+  if (!points) {  // a recorder started before this chart existed has no /api/pool
+    const restart = `<div class="empty">Restart the recorder to see this.</div>`;
+    return titles.map((t) => panel(t, restart)).join("");
+  }
+  if (!points.length) {
+    const nothing = `<div class="empty">Nothing yet.</div>`;
+    return titles.map((t) => panel(t, nothing)).join("");
+  }
+
+  const floor = "var(--muted)";
+  const values = (rows, key) => rows.map((p) => p[key]);
+  const curve = [
+    { name: "Distinct questions", values: values(points, "distinct"), color: "var(--series-1)" },
+    { name: "If every question were new", values: values(points, "n"), color: floor, dash: true },
+  ];
+  const curveBody = lineLegend(curve) + lineChart({ xs: values(points, "n"), series: curve }, { xLabel: "Questions asked" });
+
+  const settled = points.filter((p) => p.n - p.distinct >= POOL_MIN_REPEATS);
+  const latest = points[points.length - 1];
+  let poolBody = `<div class="empty">Needs ${POOL_MIN_REPEATS} repeated questions; ${num(latest.n - latest.distinct)} so far.</div>`;
+  if (settled.length) {
+    const estimates = [
+      { name: "Chao1", values: values(settled, "chao1"), color: "var(--series-1)" },
+      { name: "Good-Turing", values: values(settled, "good_turing"), color: "var(--series-2)" },
+      { name: "Equal odds", values: values(settled, "equal_odds"), color: "var(--series-3)" },
+      { name: "Birthday", values: values(settled, "birthday"), color: "var(--series-4)" },
+      { name: "Recency-adjusted", values: values(settled, "recency"), color: "var(--series-5)" },
+      { name: "Distinct so far", values: values(settled, "distinct"), color: floor, dash: true },
+    ];
+    const best = latest.recency == null ? "" : `Best estimate: about ${num(latest.recency)} (roughly ${num(latest.recency_low)}–${num(latest.recency_high)}), from the recency-adjusted line. `;
+    poolBody = lineLegend(estimates) + lineChart({ xs: values(settled, "n"), series: estimates }, { xLabel: "Questions asked" })
+      + `<p class="panel-note">${best}The other four assume any question can come up at any time, but recently asked questions rarely come back, so they read too high. Starts once ${POOL_MIN_REPEATS} questions have repeated; the recency-adjusted line starts at 400 asked. Reworded questions count separately.</p>`;
+  }
+  return panel(titles[0], curveBody) + panel(titles[1], poolBody);
+}
+
 async function overview() {
-  const o = await api("/api/overview");
+  const [o, pool] = await Promise.all([api("/api/overview"), api("/api/pool").catch(() => null)]);
   const days = o.per_day.map((d) => ({
     label: new Date(d.date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }),
     value: d.count,
@@ -157,6 +259,7 @@ async function overview() {
     ${statRow([["Rounds", num(o.rounds)], ["Unique questions", num(o.unique)], ["Games", num(o.games)],
       ["Rooms", num(o.rooms)], ["Accepted answers", num(o.accepted)], ["Rejected", num(o.rejected)]])}
     <section class="panel"><h2>Questions per day</h2>${columnChart(days)}</section>
+    ${poolPanels(pool)}
     <div class="cols">
       <section class="panel"><h2>Most frequent</h2>
         ${table([{ label: "Question", key: "question" }, { label: "Seen", key: "seen", num: true }], o.top, { link: (r) => qLink(r.question) })}

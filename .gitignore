@@ -3,3 +3,7 @@ __pycache__/
 *.tmp
 *.pyc
 data/
+.claude/
+HANDOFF.md
+krillion-report-2026-10-27.html
+analyse/

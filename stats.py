@@ -1,6 +1,7 @@
 """Aggregate stats over the recorder's data files."""
 
 import json
+import math
 import os
 import threading
 from collections import Counter, defaultdict
@@ -63,6 +64,115 @@ def local_date(iso):
 def display_name(counter):
     """Most common original spelling among variants that normalise the same."""
     return counter.most_common(1)[0][0]
+
+
+def equal_odds_pool(asked, distinct):
+    """Pool size where `asked` draws at equal odds would give `distinct` different questions on average."""
+    if distinct >= asked:
+        return None
+    expected = lambda size: size * (1 - (1 - 1 / size) ** asked)
+    low, high = distinct, distinct * 2
+    while expected(high) < distinct:
+        high *= 2
+    for _ in range(40):
+        mid = (low + high) / 2
+        if expected(mid) < distinct:
+            low = mid
+        else:
+            high = mid
+    return high
+
+
+# Recent questions rarely come back, and their odds recover over a few hundred questions. The model:
+# a question's weight rises linearly with questions since it was last asked, reaching 1 after `recovery`.
+RECOVERY_GRID = (100, 200, 300, 400, 500, 600, 800, 1000)
+RECENCY_MIN_REPEATS = 20
+RECENCY_MIN_ASKED = 400  # before this, too few questions have had time to recover and the fit swings wildly
+RECENCY_EVERY = 50  # fitted every this many questions per 1,000 asked, with straight lines between
+_recency_fits = {}  # (data dir, n, with range) -> fit; earlier questions never change, so a fit stays valid
+
+
+def recency_terms(keys, recovery):
+    """Per question asked: (seen so far, total weight of seen questions, weight of this one or None if new)."""
+    alive, last, terms = [False] * len(keys), {}, []
+    settled, young, young_sum = 0, 0, 0  # counts of latest sightings at full weight / still recovering
+    for i, k in enumerate(keys):
+        j = i - recovery
+        if j >= 0 and alive[j]:
+            young -= 1
+            young_sum -= j
+            settled += 1
+        total = settled + (i * young - young_sum) / recovery
+        previous = last.get(k)
+        terms.append((len(last), total, None if previous is None else min(1, (i - previous) / recovery)))
+        if previous is not None:
+            alive[previous] = False
+            if i - previous >= recovery:
+                settled -= 1
+            else:
+                young -= 1
+                young_sum -= previous
+        alive[i], last[k] = True, i
+        young += 1
+        young_sum += i
+    return terms
+
+
+def recency_loglik(terms, pool):
+    ll = 0.0
+    for seen, total, weight in terms:
+        pick = (pool - seen) if weight is None else weight
+        if pick <= 0:
+            return -math.inf
+        ll += math.log(pick / (pool - seen + total))
+    return ll
+
+
+def recency_best_pool(terms, distinct):
+    """The pool size that fits best; the fit has one peak, so a golden-section search finds it."""
+    ratio = (math.sqrt(5) - 1) / 2
+    a, b = float(distinct), distinct * 6.0
+    c, d = b - ratio * (b - a), a + ratio * (b - a)
+    fc, fd = recency_loglik(terms, c), recency_loglik(terms, d)
+    while b - a > 2:
+        if fc > fd:
+            b, d, fd = d, c, fc
+            c = b - ratio * (b - a)
+            fc = recency_loglik(terms, c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + ratio * (b - a)
+            fd = recency_loglik(terms, d)
+    pool = (a + b) / 2
+    return pool, recency_loglik(terms, pool)
+
+
+def recency_edge(terms, inside, outside, cutoff):
+    """Where the fit drops to `cutoff`, between a pool size above it and one below it."""
+    for _ in range(12):
+        mid = (inside + outside) / 2
+        if recency_loglik(terms, mid) >= cutoff:
+            inside = mid
+        else:
+            outside = mid
+    return inside
+
+
+def recency_fit(keys, with_range=False):
+    """Best pool size across recovery lengths, optionally with an approximate 95% range."""
+    distinct = len(set(keys))
+    fits = [(terms, *recency_best_pool(terms, distinct))
+            for terms in (recency_terms(keys, r) for r in RECOVERY_GRID)]
+    best = max(fits, key=lambda f: f[2])
+    if not with_range:
+        return {"pool": round(best[1])}
+    cutoff = best[2] - 1.92
+    low, high = best[1], best[1]
+    for terms, pool, ll in fits:
+        if ll >= cutoff:
+            low = min(low, recency_edge(terms, pool, distinct, cutoff))
+            high = max(high, recency_edge(terms, pool, distinct * 6.0, cutoff))
+    return {"pool": round(best[1]), "low": round(low), "high": round(high)}
 
 
 def load_settings(data_dir):
@@ -168,6 +278,64 @@ class Stats:
             "newest": [{"question": self.name_of(k), "first_seen": t}
                        for k, t in sorted(first_seen.items(), key=lambda kv: kv[1], reverse=True)[:10]],
         }
+
+    # ---- question pool ------------------------------------------------------------------------
+
+    def pool(self, max_points=1000):
+        """Distinct questions and pool size estimates after each question asked, oldest first.
+
+        S = distinct, n = asked, f1/f2 = questions seen once/twice. An estimate is null until defined.
+        Long histories are thinned to about max_points; the latest point is always included.
+        """
+        rows = sorted(self.questions, key=lambda q: q["timestamp_utc"])
+        step = max(1, len(rows) // max_points)
+        seen, f1, f2, pairs, out = Counter(), 0, 0, 0, []
+        for n, q in enumerate(rows, 1):
+            k = norm(q["question"])
+            times = seen[k]
+            seen[k] += 1
+            pairs += times
+            f1 += (times == 0) - (times == 1)
+            f2 += (times == 1) - (times == 2)
+            if n % step and n != len(rows):
+                continue
+            s, coverage = len(seen), 1 - f1 / n
+            equal_odds = equal_odds_pool(n, s)
+            out.append({
+                "n": n, "distinct": s, "coverage": round(coverage, 3),
+                "chao1": round(s + f1 * (f1 - 1) / (2 * (f2 + 1))),
+                "good_turing": round(s / coverage) if coverage else None,
+                "equal_odds": round(equal_odds) if equal_odds else None,
+                "birthday": round(n * (n - 1) / (2 * pairs)) if pairs else None,
+                "recency": None,
+            })
+        self.add_recency([norm(q["question"]) for q in rows], out)
+        return out
+
+    def add_recency(self, keys, points):
+        """Fill in the recency-adjusted estimate: fitted at checkpoints, straight lines between."""
+        first = next((p["n"] for p in points
+                      if p["n"] >= RECENCY_MIN_ASKED and p["n"] - p["distinct"] >= RECENCY_MIN_REPEATS), None)
+        if first is None:
+            return
+        total = len(keys)
+        step = RECENCY_EVERY * math.ceil(total / 1000)
+        checkpoints = sorted({first, total, *range(first - first % step + step, total, step)})
+        fits = {}
+        for n in checkpoints:
+            cache_key = (str(self.dir), n, n == total)
+            if cache_key not in _recency_fits:
+                _recency_fits[cache_key] = recency_fit(keys[:n], with_range=n == total)
+            fits[n] = _recency_fits[cache_key]
+        for p in points:
+            if p["n"] < first:
+                continue
+            after = next(c for c in checkpoints if c >= p["n"])
+            before = next((c for c in reversed(checkpoints) if c <= p["n"]), after)
+            share = (p["n"] - before) / (after - before) if after > before else 0
+            p["recency"] = round(fits[before]["pool"] + share * (fits[after]["pool"] - fits[before]["pool"]))
+        points[-1]["recency_low"] = fits[total]["low"]
+        points[-1]["recency_high"] = fits[total]["high"]
 
     # ---- questions --------------------------------------------------------------------------
 

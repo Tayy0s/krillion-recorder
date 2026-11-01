@@ -70,7 +70,7 @@ python dashboard.py
 ```
 
 Tabs:
-- **Overview**
+- **Overview:** includes distinct questions against questions asked, which flattens as the pool runs out, and pool size estimates (Chao1, Good-Turing, equal odds, birthday, and a recency-adjusted best estimate).
 - **Questions:** click a question for its answer bank, tiers and rejected attempts.
 - **Answers:** every attempt, filtered by text, accepted/rejected, rarity, player, question and period. It can show every attempt or unique answers, and the filters stay in the URL so links keep them.
 - **Tiers**

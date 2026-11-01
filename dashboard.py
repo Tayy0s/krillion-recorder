@@ -57,6 +57,7 @@ class Handler(SimpleHTTPRequestHandler):
         s = self.stats()
         routes = {
             "/api/overview": lambda: s.overview(),
+            "/api/pool": lambda: s.pool(),
             "/api/questions": lambda: s.questions_table(),
             "/api/question": lambda: s.question_detail(q.get("q", "")),
             "/api/answers": lambda: s.answers(),
